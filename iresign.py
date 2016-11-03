@@ -21,6 +21,7 @@ import argparse
 import plistlib
 import tempfile
 import subprocess
+import zipfile
 
 
 __version__ = '0.2.2'
@@ -65,6 +66,7 @@ def read_provisioning_profile(filename):
     Read and parse a given filename as provisioning profile, and return
     a `dict` with profile's attributes.
     """
+
     content = {}
     with open(filename, 'rb') as f:
         content = read_plist_from_string(f.read())
@@ -103,6 +105,16 @@ def generate_entitlements(provision_entitlements, app):
     p = subprocess.Popen(command.format(
         app=app['filename']
     ), shell=True, stdout=subprocess.PIPE)
+
+    print "-=-=-=-=-=-=-=-run command-=-=-=-=-=-=-=-"
+    print command.format(
+        app=app['filename']
+    )
+    if p.stderr:
+        print "-=-=-=-=-=-=-=-command error or Warning-=-=-=-=-=-=-=-"
+        print p.stderr.read()
+        pass
+
     entitlements = read_plist_from_string(p.communicate()[0])
     access_groups = entitlements.get('keychain-access-groups')
 
@@ -136,7 +148,20 @@ def recodesign(app, provision, identity, dryrun=False):
         entitlements=entitlements.name,
         app=app['filename']
     ), shell=True, stderr=subprocess.PIPE)
+
     p.wait()
+
+    print "-=-=-=-=-=-=-=-run command-=-=-=-=-=-=-=-"
+    print command.format(
+        dryrun='--dryrun' if dryrun else '',
+        identity=identity,
+        entitlements=entitlements.name,
+        app=app['filename']
+    )
+    if p.stderr:
+        print "-=-=-=-=-=-=-=-command error or Warning-=-=-=-=-=-=-=-"
+        print p.stderr.read()
+        pass
 
     os.unlink(entitlements.name)
 
@@ -164,7 +189,21 @@ def main():
     arguments = parse_arguments()
 
     # get main three components for recodesigning
-    application = read_application(arguments.app)
+    ipa = arguments.ipa
+
+    appRootPath = old_ipa_process(ipa)
+
+    for dir in os.listdir(appRootPath):
+        if '.app' in dir:
+            applicationPath = appRootPath + '/' + dir
+            break
+
+    if not applicationPath.strip():
+        print 'no app file in ipa'
+        sys.exit()
+    else:
+        application = read_application(applicationPath)
+
     provision = read_provisioning_profile(arguments.provisioning_profile)
     identity = arguments.identity
 
@@ -177,7 +216,10 @@ def main():
     print('* Recodesigning :: {old} => {new}'.format(
         old=application['provision']['name'], new=provision['name']))
     recodesign(application, provision, identity, arguments.dryrun)
-    print('* done!')
+
+    print('resign done!')
+
+    file_to_ipa(appRootPath)
 
 
 def parse_arguments():
@@ -187,12 +229,12 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description='iResign is a tool for recodesigning iOS applications.')
 
-    parser.add_argument('app', help='the path to the iOS application file')
+    parser.add_argument('ipa', help='the path to the iOS application ipa file')
 
     parser.add_argument('provisioning_profile',
                         help='the path to the provisioning profile')
 
-    parser.add_argument('identity', nargs='?', default='iPhone Developer',
+    parser.add_argument('identity', default='iPhone Developer',
                         help='the signing identity')
 
     parser.add_argument('-d', '--dryrun', dest='dryrun', action='store_true',
@@ -204,5 +246,76 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def old_ipa_process(ipa_path):
+    path = os.path.split(ipa_path)[0]
+    tmpPath = path + '/iresign_tmp'
+
+    zipName = '/ipa.zip'
+    zipPath = tmpPath + zipName
+
+    try:
+        shutil.rmtree(tmpPath)
+    except:
+        pass
+
+    os.mkdir(tmpPath)
+
+    if os.path.exists(ipa_path):
+        shutil.copyfile(ipa_path, zipPath)
+    else:
+        print 'ipa not exist'
+        sys.exit()
+
+    fileDir = zip_to_file(zipPath)
+    return fileDir
+
+
+def zip_to_file(zip_path):
+    path = os.path.split(zip_path)[0]
+
+    r = zipfile.is_zipfile(zip_path)
+    if r:
+        fz = zipfile.ZipFile(zip_path, 'r')
+        for file in fz.namelist():
+            fz.extract(file, path)
+    else:
+        print('This file is not zip file')
+
+    return path + '/Payload'
+
+
+def file_to_ipa(file_path):
+    try:
+        import zlib
+        compression = zipfile.ZIP_DEFLATED
+    except:
+        compression = zipfile.ZIP_STORED
+
+    path = file_path
+    start = path.rfind(os.sep) + 1
+    zipPath = path + '.zip'
+    z = zipfile.ZipFile(zipPath, mode="w", compression=compression)
+    try:
+        for dirpath, dirs, files in os.walk(path):
+            for file in files:
+                if file == zipPath or file == "zip.py":
+                    continue
+                z_path = os.path.join(dirpath, file)
+                z.write(z_path, z_path[start:])
+        z.close()
+    except:
+        if z:
+            z.close()
+
+    os.rename(zipPath, path + '.ipa')
+    shutil.rmtree(path)
+
+    ipaZipPath = os.path.split(path)[0] + '/ipa.zip'
+    os.remove(ipaZipPath)
+
+    print 'new ipa is created:' + path + '.ipa'
+
 if __name__ == '__main__':
     main()
+
+    print 'iresign finish!'
